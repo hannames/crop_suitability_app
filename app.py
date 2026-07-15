@@ -27,8 +27,17 @@ st.set_page_config(
 # ── Inline CSS ────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
-  .main-title { font-size: 2rem; font-weight: 700; color: #1A5C30; margin-bottom: 0; }
-  .sub-title  { font-size: 1rem; color: #555; margin-bottom: 1.5rem; }
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+
+  html, body, [class*="css"], .stMarkdown, p, h1, h2, h3, h4, label, div, button, input, select {
+    font-family: 'Inter', sans-serif !important;
+    letter-spacing: -0.01em;
+  }
+
+  .main-title { font-size: 2rem; font-weight: 700; color: #1A5C30; margin-bottom: 0;
+                font-family: 'Inter', sans-serif !important; letter-spacing: -0.02em; }
+  .sub-title  { font-size: 1rem; color: #555; margin-bottom: 1.5rem;
+                font-family: 'Inter', sans-serif !important; font-weight: 400; }
   .metric-box { background: #EAF5EE; border-radius: 8px; padding: 12px 16px;
                 border-left: 4px solid #2E7D46; margin-bottom: 8px; }
   .metric-val { font-size: 1.4rem; font-weight: 700; color: #1A5C30; }
