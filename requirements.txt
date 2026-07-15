@@ -1,0 +1,13 @@
+streamlit>=1.32.0
+earthengine-api>=0.1.380
+geemap>=0.30.0
+folium>=0.16.0
+streamlit-folium>=0.20.0
+geopandas>=0.14.0
+shapely>=2.0.0
+pyproj>=3.6.0
+reportlab>=4.1.0
+pandas>=2.0.0
+numpy>=1.26.0
+pykml>=0.2.0
+requests>=2.31.0
