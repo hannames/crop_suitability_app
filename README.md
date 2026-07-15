@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # 🌾 Crop Suitability Analyser
 
 Upload a parcel boundary (KML/KMZ/GeoJSON), select a crop, and get
@@ -153,3 +154,6 @@ crop_suitability_app/
 - [ ] Soil data integration (SoilGrids)
 - [ ] Export GEE script for custom editing
 - [ ] User login + history of past analyses
+=======
+# crop_suitability_app
+>>>>>>> e2e2f4ebb7552732830888c6de72db6b6de74986
