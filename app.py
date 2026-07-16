@@ -1,704 +1,266 @@
 """
-app.py
-Main Streamlit application for crop suitability analysis.
-Supports: file upload (KML/KMZ/GeoJSON) OR drawing on map.
+app.py — Cropbility Home Page
+Welcome, app explanation, and parameter weight customisation.
 """
 
 import json
 import streamlit as st
-import folium
-from folium.plugins import Draw, Geocoder, MiniMap, LocateControl
-from streamlit_folium import st_folium
-
-from kml_utils import parse_uploaded_file
-from gee_analysis import initialise_gee, run_analysis
-from report_generator import generate_report
-from crop_config import CROPS
 from translations import T
+from crop_config import CROPS
 
-# ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title='Crop Suitability Analyser',
+    page_title='Cropbility',
     page_icon='🌾',
     layout='wide',
     initial_sidebar_state='expanded',
 )
 
-# ── Inline CSS ────────────────────────────────────────────────────────────────
+# ── Font + CSS ────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
-
   html, body, [class*="css"], .stMarkdown, p, h1, h2, h3, h4, label, div, button, input, select {
     font-family: 'Inter', sans-serif !important;
     letter-spacing: -0.01em;
   }
-
-  .main-title { font-size: 2rem; font-weight: 700; color: #1A5C30; margin-bottom: 0;
-                font-family: 'Inter', sans-serif !important; letter-spacing: -0.02em; }
-  .sub-title  { font-size: 1rem; color: #555; margin-bottom: 1.5rem;
-                font-family: 'Inter', sans-serif !important; font-weight: 400; }
-  .metric-box { background: #EAF5EE; border-radius: 8px; padding: 12px 16px;
-                border-left: 4px solid #2E7D46; margin-bottom: 8px; }
-  .metric-val { font-size: 1.4rem; font-weight: 700; color: #1A5C30; }
-  .metric-lbl { font-size: 0.8rem; color: #555; }
-  .warn-box   { background: #FFF3CD; border-left: 4px solid #E65100;
-                border-radius: 6px; padding: 10px 14px; font-size: 0.85rem; }
-  .draw-tip   { background: #E8F1FB; border-left: 4px solid #1F4E79;
-                border-radius: 6px; padding: 10px 14px; font-size: 0.85rem; margin-bottom: 10px; }
+  .hero        { padding: 2.5rem 0 1.5rem 0; }
+  .hero-title  { font-size: 3rem; font-weight: 700; color: #1A5C30;
+                 letter-spacing: -0.03em; margin-bottom: 0.5rem; }
+  .hero-sub    { font-size: 1.15rem; color: #555; max-width: 680px; line-height: 1.7; }
+  .page-card   { background: #F9FBF9; border: 1px solid #D4E8D4; border-radius: 12px;
+                 padding: 1.5rem; height: 100%; }
+  .page-card h4{ color: #1A5C30; font-size: 1rem; font-weight: 600; margin-bottom: 0.5rem; }
+  .page-card p { color: #555; font-size: 0.88rem; line-height: 1.6; margin: 0; }
+  .page-num    { font-size: 1.8rem; margin-bottom: 0.5rem; }
+  .param-box   { background: #EAF5EE; border-radius: 10px; padding: 1.2rem 1.5rem;
+                 border-left: 4px solid #2E7D46; margin-bottom: 0.75rem; }
+  .param-box p { font-size: 0.82rem; color: #555; margin: 0.2rem 0 0 0; }
+  .weight-total{ font-size: 0.9rem; font-weight: 600; padding: 8px 14px;
+                 border-radius: 6px; display: inline-block; margin-top: 8px; }
+  .divider     { border: none; border-top: 1px solid #E0EDE0; margin: 2rem 0; }
 </style>
 """, unsafe_allow_html=True)
 
-# ── GEE init ──────────────────────────────────────────────────────────────────
-@st.cache_resource(show_spinner='Connecting to Google Earth Engine...')
-def init_gee():
-    try:
-        try:
-            sa  = st.secrets.get('GEE_SERVICE_ACCOUNT', None)
-            key = st.secrets.get('GEE_KEY_JSON', None)
-        except Exception:
-            sa, key = None, None
-        if sa and key:
-            key_dict = json.loads(key) if isinstance(key, str) else key
-            initialise_gee(service_account=sa, key_json=key_dict)
-        else:
-            initialise_gee()
-        return True
-    except Exception as e:
-        return str(e)
+# ── Language ──────────────────────────────────────────────────────────────────
+if 'lang' not in st.session_state:
+    st.session_state['lang'] = 'en'
 
-gee_status = init_gee()
+lang_choice = st.sidebar.radio(
+    'Language / Langue',
+    options=['🇬🇧 English', '🇫🇷 Français'],
+    horizontal=True,
+    label_visibility='collapsed',
+    key='lang_radio_home'
+)
+lang = 'fr' if 'Français' in lang_choice else 'en'
+st.session_state['lang'] = lang
 
-# ── Sidebar ───────────────────────────────────────────────────────────────────
-with st.sidebar:
-    st.markdown('### 🌾 Crop Suitability Analyser')
-
-    # Language selector
-    lang_choice = st.radio(
-        'Language / Langue',
-        options=['🇬🇧 English', '🇫🇷 Français'],
-        horizontal=True, label_visibility='collapsed')
-    lang = 'fr' if 'Français' in lang_choice else 'en'
-    st.session_state['lang'] = lang
-    st.markdown('---')
-
-    if gee_status is True:
-        st.success(T(lang, 'gee_ok'))
-    else:
-        st.error(f"{T(lang, 'gee_err')}: {gee_status}")
-        st.info(T(lang, 'gee_hint'))
-
-    st.markdown('---')
-
-    # ── Input method toggle ───────────────────────────────────────────────────
-    st.markdown(f"**{T(lang,'step1')}**")
-    input_method = st.radio(
-        'How do you want to define the parcel?',
-        options=['✏️ Draw on map', '📂 Upload file'],
-        horizontal=True
-    )
-
-    st.markdown('---')
-    st.markdown('**Step 2 — Choose crop**')
-    crop_name = st.selectbox(
-        'Crop type',
-        options=list(CROPS.keys()),
-        format_func=lambda k: f"{CROPS[k]['icon']} {CROPS[k]['label_fr']}" if lang=='fr' else f"{CROPS[k]['icon']} {CROPS[k]['label_en']}",
-    )
-
-    st.markdown(f"**{T(lang,'step3')}**")
-    buffer_km = st.slider(T(lang,'buffer_lbl'), 0, 5, 0)
-
-    crop_cfg   = CROPS[crop_name]
-    use_target = st.checkbox(T(lang,'target_chk'), value=True)
-    if use_target:
-        target_ha = st.number_input(
-            T(lang,'target_lbl'),
-            min_value=int(crop_cfg['min_viable_ha']),
-            max_value=100000,
-            value=int(crop_cfg['target_ha']),
-            step=500,
-        )
-    else:
-        target_ha = None
-        st.caption(T(lang,'no_target'))
-
-    st.markdown('---')
-    run_btn = st.button(
-        T(lang,'run_btn'),
-        disabled=(gee_status is not True),
-        use_container_width=True,
-        type='primary'
-    )
-
-    st.markdown('---')
-    st.markdown(
-        '<div style="font-size:0.75rem;color:#888;">'
-        'Data: SRTM · HydroSHEDS · Hansen GFC · ESA WorldCover · VIIRS<br>'
-        'Platform: Google Earth Engine | Resolution: 30 m/pixel'
-        '</div>', unsafe_allow_html=True
-    )
-
-# ── Main area ─────────────────────────────────────────────────────────────────
-lang = st.session_state.get('lang','en')
-st.markdown(f'<div class="main-title">{T(lang,"app_title")}</div>', unsafe_allow_html=True)
-st.markdown(
-    '<div class="sub-title">Define a parcel boundary → select a crop → '
-    'get suitability zones and a downloadable report.</div>',
+st.sidebar.markdown('---')
+st.sidebar.markdown(
+    '<div style="font-size:0.75rem;color:#888;">'
+    'Cropbility v1.0<br>'
+    'Data: SRTM · HydroSHEDS · Hansen · ESA · VIIRS · CHIRPS · NEX-GDDP<br>'
+    'Platform: Google Earth Engine</div>',
     unsafe_allow_html=True
 )
 
-# ── Initialise session state ──────────────────────────────────────────────────
-if 'drawn_parcel' not in st.session_state:
-    st.session_state['drawn_parcel'] = None
-if 'parcel_info' not in st.session_state:
-    st.session_state['parcel_info'] = None
+# ── Hero ──────────────────────────────────────────────────────────────────────
+st.markdown('<div class="hero">', unsafe_allow_html=True)
 
-parcel_info = None
-
-# ══════════════════════════════════════════════════════════════════════════════
-# OPTION A — DRAW ON MAP
-# ══════════════════════════════════════════════════════════════════════════════
-if T(lang,'draw_opt') in input_method:
-
-    st.markdown("""
-<div class="draw-tip">
-<b>How to draw your parcel:</b><br>
-1. Use the <b>polygon tool</b> (pentagon icon) in the top-left of the map<br>
-2. Click to place each corner of your parcel<br>
-3. Double-click to close the polygon<br>
-4. The coordinates are captured automatically — then click <b>Run Analysis</b>
-</div>
-""", unsafe_allow_html=True)
-
-    # Drawing map — centred on Cameroon by default
-    draw_map = folium.Map(
-        location=[6.5, 13.5],
-        zoom_start=8,
-        tiles='CartoDB positron'
-    )
-
-    # Add satellite layer
-    folium.TileLayer(
-        tiles='https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
-        attr='Esri', name='Satellite', overlay=False
-    ).add_to(draw_map)
-
-    # Draw plugin — polygon and rectangle only
-    Draw(
-        export=False,
-        draw_options={
-            'polygon':   {'allowIntersection': False},
-            'rectangle': True,
-            'polyline':  False,
-            'circle':    False,
-            'marker':    False,
-            'circlemarker': False,
-        },
-        edit_options={'edit': True, 'remove': True}
-    ).add_to(draw_map)
-
-    # Search box directly on the map — type a place, map pans there
-    Geocoder(
-        position='topright',
-        add_marker=True,
-        placeholder=T(lang,'search_placeholder'),
-        collapsed=False
-    ).add_to(draw_map)
-
-    # Locate me button
-    LocateControl(position='topleft').add_to(draw_map)
-
-    # Mini map for context
-    MiniMap(toggle_display=True).add_to(draw_map)
-
-    folium.LayerControl().add_to(draw_map)
-
-    # If there's a previously drawn polygon, show it
-    if st.session_state['drawn_parcel']:
-        coords = st.session_state['drawn_parcel']['coordinates'][0]
-        folium.Polygon(
-            locations=[[c[1], c[0]] for c in coords],
-            color='#FF6600', weight=3,
-            fill=True, fill_color='#FF6600', fill_opacity=0.15,
-            tooltip='Your parcel'
-        ).add_to(draw_map)
-
-    map_output = st_folium(
-        draw_map,
-        height=500,
-        use_container_width=True,
-        returned_objects=['all_drawings']
-    )
-
-    # Read drawn geometry
-    drawings = map_output.get('all_drawings') or []
-    if drawings:
-        last = drawings[-1]
-        geom = last.get('geometry', {})
-        gtype = geom.get('type', '')
-
-        if gtype == 'Polygon':
-            raw_coords = geom['coordinates'][0]
-            coords = [[c[0], c[1]] for c in raw_coords]
-        elif gtype == 'Rectangle':
-            raw_coords = geom['coordinates'][0]
-            coords = [[c[0], c[1]] for c in raw_coords]
-        else:
-            coords = None
-
-        if coords:
-            # Close the ring if not already closed
-            if coords[0] != coords[-1]:
-                coords.append(coords[0])
-
-            # Build parcel_info
-            import math
-            def approx_area(pts):
-                cx = sum(c[0] for c in pts) / len(pts)
-                cy = sum(c[1] for c in pts) / len(pts)
-                cos_lat = math.cos(math.radians(cy))
-                pts_m = [((c[0]-cx)*111320*cos_lat, (c[1]-cy)*110574) for c in pts]
-                n = len(pts_m)
-                area = 0
-                for i in range(n):
-                    area += pts_m[i][0]*pts_m[(i+1)%n][1] - pts_m[(i+1)%n][0]*pts_m[i][1]
-                return abs(area)/2/10000
-
-            lons = [c[0] for c in coords]
-            lats = [c[1] for c in coords]
-            area = approx_area(coords[:-1])
-            cx   = sum(lons)/len(lons)
-            cy   = sum(lats)/len(lats)
-
-            parcel_info = {
-                'type': 'Polygon',
-                'coordinates': [coords],
-                'name': 'Drawn parcel',
-                'area_ha': round(area, 1),
-                'centroid': (cx, cy),
-                'bounds': {'minx': min(lons), 'maxx': max(lons),
-                           'miny': min(lats), 'maxy': max(lats)},
-            }
-            st.session_state['drawn_parcel']  = {'coordinates': [coords]}
-            st.session_state['parcel_info']   = parcel_info
-            st.success(f'✅ Parcel captured — {area:,.1f} ha at {cy:.4f}°N, {cx:.4f}°E')
-
-    elif st.session_state['parcel_info']:
-        parcel_info = st.session_state['parcel_info']
-        st.info(f'Using previously drawn parcel — {parcel_info["area_ha"]:,.1f} ha')
-
-    if not parcel_info:
-        st.info('👆 Draw a polygon on the map above, then click **Run Analysis** in the sidebar.')
-
-# ══════════════════════════════════════════════════════════════════════════════
-# OPTION B — UPLOAD FILE
-# ══════════════════════════════════════════════════════════════════════════════
+if lang == 'fr':
+    st.markdown('<div class="hero-title">🌾 Bienvenue sur Cropbility</div>', unsafe_allow_html=True)
+    st.markdown('''<div class="hero-sub">
+        Cropbility est un outil d\'analyse géospatiale alimenté par Google Earth Engine.
+        Téléversez ou dessinez une parcelle agricole et obtenez en quelques minutes :
+        une carte d\'aptitude des cultures, une évaluation de l\'impact environnemental
+        et des projections climatiques sur 5 à 20 ans.
+    </div>''', unsafe_allow_html=True)
 else:
-    uploaded_file = st.file_uploader(
-        T(lang,'upload_label'),
-        type=['kml', 'kmz', 'geojson', 'json'],
+    st.markdown('<div class="hero-title">🌾 Welcome to Cropbility</div>', unsafe_allow_html=True)
+    st.markdown('''<div class="hero-sub">
+        Cropbility is a geospatial analysis tool powered by Google Earth Engine.
+        Upload or draw an agricultural parcel and get — in minutes — a crop suitability map,
+        an environmental impact assessment, and climate projections for the next 5 to 20 years.
+    </div>''', unsafe_allow_html=True)
+
+st.markdown('</div>', unsafe_allow_html=True)
+
+# ── Page cards ────────────────────────────────────────────────────────────────
+st.markdown('<hr class="divider">', unsafe_allow_html=True)
+
+if lang == 'fr':
+    st.markdown('### Ce que vous pouvez faire')
+else:
+    st.markdown('### What you can do')
+
+c1, c2, c3 = st.columns(3)
+
+pages_en = [
+    ('🌾', 'Crop Suitability',
+     '• Check if your parcel is suitable for the crop you want to plant\n'
+     '• Adjust the scoring weights to match your knowledge\n'
+     '• Identify the ideal sub-area to plant\n'
+     '• Download a suitability report'),
+    ('🌿', 'Environmental Impact',
+     '• Assess the environmental impact of your crop and parcel\n'
+     '• Estimate the carbon stock and forest cover\n'
+     '• Calculate potential REDD+ carbon credit value\n'
+     '• Download an environmental impact report'),
+    ('🌡️', 'Climate Impact',
+     '• Check how climate change will affect your parcel\n'
+     '• Rainfall and temperature projections: 5 / 10 / 15 / 20 years\n'
+     '• Drought risk and flood frequency trends\n'
+     '• Download a climate impact report'),
+]
+
+pages_fr = [
+    ('🌾', 'Aptitude des cultures',
+     '• Vérifier si votre parcelle convient à la culture souhaitée\n'
+     '• Ajuster les pondérations selon votre expertise\n'
+     '• Identifier la meilleure sous-zone à cultiver\n'
+     '• Télécharger un rapport d\'aptitude'),
+    ('🌿', 'Impact environnemental',
+     '• Évaluer l\'impact environnemental de votre culture et parcelle\n'
+     '• Estimer le stock de carbone et la couverture forestière\n'
+     '• Calculer la valeur potentielle des crédits carbone REDD+\n'
+     '• Télécharger un rapport d\'impact environnemental'),
+    ('🌡️', 'Impact climatique',
+     '• Analyser l\'impact du changement climatique sur votre parcelle\n'
+     '• Projections de pluie et température : 5 / 10 / 15 / 20 ans\n'
+     '• Risques de sécheresse et tendances d\'inondation\n'
+     '• Télécharger un rapport d\'impact climatique'),
+]
+
+pages = pages_fr if lang == 'fr' else pages_en
+
+for col, (icon, title, desc) in zip([c1, c2, c3], pages):
+    with col:
+        items = ''.join(
+            f'<li style="margin-bottom:6px;font-size:0.87rem;color:#444;">{line[2:]}</li>'
+            for line in desc.strip().split('\n')
+        )
+        st.markdown(
+            f'<div class="page-card">'
+            f'<div class="page-num">{icon}</div>'
+            f'<h4>{title}</h4>'
+            f'<ul style="padding-left:16px;margin:0;">{items}</ul>'
+            f'</div>',
+            unsafe_allow_html=True
+        )
+
+# ── Parameter weights ─────────────────────────────────────────────────────────
+st.markdown('<hr class="divider">', unsafe_allow_html=True)
+
+if lang == 'fr':
+    st.markdown('### ⚙️ Paramètres de pondération — Utilisateurs avancés')
+    st.markdown(
+        'Ajustez les pondérations utilisées dans l\'analyse d\'aptitude des cultures. '
+        'La somme doit être égale à 100%. Ces paramètres s\'appliquent à toutes les analyses.'
+    )
+else:
+    st.markdown('### ⚙️ Scoring weights — Advanced users')
+    st.markdown(
+        'Adjust the weights used in the crop suitability scoring. '
+        'They must sum to 100%. These apply across all analyses.'
     )
 
-    if uploaded_file is not None:
-        try:
-            file_bytes = uploaded_file.read()
-            parcel_info = parse_uploaded_file(file_bytes, uploaded_file.name)
-            st.session_state['parcel_info'] = parcel_info
+# Load defaults from session state or use standard
+default_weights = st.session_state.get('custom_weights', {
+    'slope': 30, 'water': 25, 'elec': 15,
+    'wetness': 13, 'clearing': 12, 'flood': 5
+})
 
-            # Preview map
-            coords = parcel_info['coordinates'][0]
-            lon, lat = parcel_info['centroid']
-            m = folium.Map(location=[lat, lon], zoom_start=11, tiles='CartoDB positron')
-            folium.TileLayer(
-                tiles='https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
-                attr='Esri', name='Satellite'
-            ).add_to(m)
-            folium.Polygon(
-                locations=[[c[1], c[0]] for c in coords],
-                color='#FF6600', weight=3,
-                fill=True, fill_color='#FF6600', fill_opacity=0.15,
-                tooltip=parcel_info['name']
-            ).add_to(m)
-            folium.LayerControl().add_to(m)
-            st_folium(m, height=400, use_container_width=True)
+criteria_info = {
+    'en': [
+        ('slope',    'Slope',               'Flat land scores highest. Rice needs <2% slope for efficient paddy construction.'),
+        ('water',    'Water proximity',      'Distance to nearest permanent stream. Closer = cheaper irrigation canal.'),
+        ('elec',     'Electricity proximity','Distance to electrified settlements. Needed for pumping and processing.'),
+        ('wetness',  'Terrain wetness',      'Low-lying valley bottoms retain water naturally, reducing irrigation cost.'),
+        ('clearing', 'Clearing cost',        'Open grassland is cheapest to prepare. Dense forest adds 800–1,200 USD/ha.'),
+        ('flood',    'Flood risk',           'Pixels near main stream channels receive a penalty for uncontrolled flooding risk.'),
+    ],
+    'fr': [
+        ('slope',    'Pente',                'Les terrains plats ont le score le plus élevé. Le riz nécessite <2% de pente.'),
+        ('water',    'Proximité de l\'eau',  'Distance au cours d\'eau permanent le plus proche. Plus proche = canal moins cher.'),
+        ('elec',     'Proximité électrique', 'Distance aux habitations électrifiées. Nécessaire pour le pompage et la transformation.'),
+        ('wetness',  'Humidité du terrain',  'Les bas-fonds retiennent l\'eau naturellement, réduisant le coût d\'irrigation.'),
+        ('clearing', 'Coût de défrichage',   'La prairie est la moins chère à préparer. La forêt dense ajoute 800–1 200 USD/ha.'),
+        ('flood',    'Risque d\'inondation', 'Les pixels proches des chenaux principaux reçoivent une pénalité.'),
+    ]
+}
 
-        except Exception as e:
-            st.error(f'Could not read file: {e}')
-            parcel_info = None
+cols_a, cols_b = st.columns(2)
+new_weights = {}
+info = criteria_info[lang]
 
-    elif st.session_state['parcel_info']:
-        parcel_info = st.session_state['parcel_info']
+for i, (key, label, desc) in enumerate(info):
+    col = cols_a if i < 3 else cols_b
+    with col:
+        val = st.slider(
+            f'**{label}**',
+            min_value=0, max_value=50,
+            value=default_weights.get(key, 10),
+            step=1, key=f'w_{key}'
+        )
+        st.markdown(f'<p style="font-size:0.8rem;color:#666;margin-top:-8px;margin-bottom:12px;">{desc}</p>',
+                    unsafe_allow_html=True)
+        new_weights[key] = val
 
-    if not parcel_info:
-        st.info('👈 Upload a KML, KMZ or GeoJSON file above.')
+total = sum(new_weights.values())
+color = '#1A9641' if total == 100 else '#E65100'
+label_total = 'Total' if lang == 'en' else 'Total'
+warn = '' if total == 100 else (' — must equal 100%' if lang == 'en' else ' — doit égaler 100%')
 
-# ── Parcel summary metrics ────────────────────────────────────────────────────
-if parcel_info:
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.markdown(f'<div class="metric-box"><div class="metric-val">{parcel_info["name"]}</div>'
-                    f'<div class="metric-lbl">Parcel name</div></div>', unsafe_allow_html=True)
-    with col2:
-        st.markdown(f'<div class="metric-box"><div class="metric-val">{parcel_info["area_ha"]:,.0f} ha</div>'
-                    f'<div class="metric-lbl">Total area</div></div>', unsafe_allow_html=True)
-    with col3:
-        lon, lat = parcel_info['centroid']
-        st.markdown(f'<div class="metric-box"><div class="metric-val">{lat:.4f}°N</div>'
-                    f'<div class="metric-lbl">{lon:.4f}°E</div></div>', unsafe_allow_html=True)
-    with col4:
-        st.markdown(f'<div class="metric-box"><div class="metric-val">'
-                    f'{crop_cfg["icon"]} {crop_name}</div>'
-                    f'<div class="metric-lbl">Selected crop</div></div>', unsafe_allow_html=True)
+st.markdown(
+    f'<div class="weight-total" style="background:{"#EAF5EE" if total==100 else "#FFF3CD"};'
+    f'color:{color};border:1px solid {color};">'
+    f'{label_total}: {total}%{warn}</div>',
+    unsafe_allow_html=True
+)
 
-# ── Run analysis ──────────────────────────────────────────────────────────────
-if run_btn and parcel_info:
-
-    # Progress UI
-    progress_bar = st.progress(0, text=T(lang,'prog_connect'))
-    status_text  = st.empty()
-    step_list    = st.empty()
-    completed    = []
-
-    def update_progress(step, total, message):
-        pct = int((step / total) * 100)
-        progress_bar.progress(pct, text=f'🛰️  {message}')
-        status_text.markdown(T(lang,'prog_step',s=step,t=total,p=pct))
-        completed.append(f'✅ {message}')
-        step_list.markdown('\n'.join(completed[-5:]))
-
-    try:
-        results = run_analysis(
-            parcel_geojson=parcel_info,
-            crop_name=crop_name,
-            buffer_m=buffer_km * 1000,
-            target_ha=int(target_ha) if target_ha else None,
-            progress_callback=update_progress)
-        progress_bar.progress(100, text=T(lang,'prog_complete'))
-        status_text.success(T(lang,'prog_success'))
-        step_list.empty()
-        st.session_state['results']     = results
-        st.session_state['parcel_info'] = parcel_info
-        st.session_state['crop_name']   = crop_name
-    except Exception as e:
-        progress_bar.empty()
-        status_text.empty()
-        step_list.empty()
-        st.error(f'Analysis failed: {e}')
-        st.stop()
-
-elif run_btn and not parcel_info:
-    st.warning(T(lang,'run_warning'))
-
-# ── Show results ──────────────────────────────────────────────────────────────
-if 'results' in st.session_state:
-    results     = st.session_state['results']
-    parcel_info = st.session_state['parcel_info']
-    crop_name   = st.session_state['crop_name']
-
-    st.markdown('---')
-    st.markdown(T(lang,'results_title'))
-
-    zone_areas = results['zone_areas']
-    zone_meta  = {
-        '4': ('Zone 4 — PRIME',    '#1A9641', 'Best — develop first'),
-        '3': ('Zone 3 — GOOD',     '#66BD63', 'Good — Phase 2'),
-        '2': ('Zone 2 — MARGINAL', '#FFA500', 'Manageable constraints'),
-        '1': ('Zone 1 — AVOID',    '#D73027', 'Steep/far/dense forest'),
-        '0': ('Zone 0 — STREAMS',  '#0033CC', 'Irrigation source'),
-    }
-
-    cols = st.columns(5)
-    for i, (key, (label, color, desc)) in enumerate(zone_meta.items()):
-        ha = zone_areas.get(key, 0)
-        with cols[i]:
-            st.markdown(
-                f'<div style="background:{color};color:white;border-radius:8px;'
-                f'padding:12px;text-align:center;">'
-                f'<div style="font-size:1.3rem;font-weight:700;">{ha:,.0f} ha</div>'
-                f'<div style="font-size:0.7rem;margin-top:4px;">{label}</div>'
-                f'<div style="font-size:0.65rem;opacity:0.85;">{desc}</div>'
-                f'</div>', unsafe_allow_html=True
-            )
-
-    st.markdown('<br>', unsafe_allow_html=True)
-
-    map_col, stat_col = st.columns([3, 2])
-
-    with map_col:
-        st.markdown(T(lang,'zone_map_title'))
-        zone_colors = {'4':'#1A9641','3':'#A6D96A','2':'#FDAE61','1':'#D73027','0':'#0033CC'}
-        coords = parcel_info['coordinates'][0]
-        lon, lat = parcel_info['centroid']
-
-        m2 = folium.Map(location=[lat, lon], zoom_start=11)
-        folium.TileLayer(
-            tiles='https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
-            attr='Esri', name='Satellite'
-        ).add_to(m2)
-        folium.TileLayer('CartoDB positron', name='Light map').add_to(m2)
-
-        zones_fc = results.get('zones_geojson', {})
-        if zones_fc and zones_fc.get('features'):
-            for feat in zones_fc['features']:
-                zone_val = str(int(feat['properties'].get('zone', 1)))
-                color    = zone_colors.get(zone_val, '#888888')
-                lbl, _, desc = zone_meta.get(zone_val, (f'Zone {zone_val}', '#888', ''))
-                folium.GeoJson(
-                    feat,
-                    style_function=lambda f, c=color: {
-                        'fillColor': c, 'color': c,
-                        'weight': 0.5, 'fillOpacity': 0.6
-                    },
-                    tooltip=f'{lbl} — {desc}'
-                ).add_to(m2)
-
-        best_fc = results.get('best_area_geojson', {})
-        if best_fc and best_fc.get('features'):
-            folium.GeoJson(
-                best_fc,
-                name=f'Best {target_ha:,} ha',
-                style_function=lambda f: {
-                    'color': '#FF00FF', 'weight': 2.5,
-                    'fillColor': 'none', 'fillOpacity': 0
-                },
-                tooltip='Best area' if not target_ha else f'Best {target_ha:,} ha'
-            ).add_to(m2)
-
-        folium.Polygon(
-            locations=[[c[1], c[0]] for c in coords],
-            color='#FF6600', weight=3, fill=False,
-            tooltip=parcel_info['name']
-        ).add_to(m2)
-
-        legend_html = '''
-        <div style="position:fixed;bottom:20px;left:20px;z-index:1000;
-                    background:white;padding:10px 14px;border-radius:8px;
-                    border:1px solid #ccc;font-size:12px;line-height:1.8;">
-            <b>Suitability Zones</b><br>
-            <span style="background:#1A9641;color:white;padding:1px 8px;border-radius:3px;">Zone 4</span> Prime<br>
-            <span style="background:#A6D96A;padding:1px 8px;border-radius:3px;">Zone 3</span> Good<br>
-            <span style="background:#FDAE61;padding:1px 8px;border-radius:3px;">Zone 2</span> Marginal<br>
-            <span style="background:#D73027;color:white;padding:1px 8px;border-radius:3px;">Zone 1</span> Avoid<br>
-            <span style="background:#0033CC;color:white;padding:1px 8px;border-radius:3px;">Zone 0</span> Streams<br>
-            <span style="color:#FF00FF;font-weight:700;">── </span> Best area target
-        </div>'''
-        m2.get_root().html.add_child(folium.Element(legend_html))
-        folium.LayerControl().add_to(m2)
-        st_folium(m2, height=500, use_container_width=True)
-
-    with stat_col:
-        st.markdown(T(lang,'score_title'))
-        comp    = results.get('component_means', {})
-        cfg     = results.get('crop_config', {})
-        weights = cfg.get('weights', {})
-        criteria = [
-            ('slope_score',    'Slope',        'slope',    '#1A9641'),
-            ('water_score',    'Water dist.',  'water',    '#1A90C8'),
-            ('elec_score',     'Electricity',  'elec',     '#F9A825'),
-            ('wetness_score',  'Terrain wet.', 'wetness',  '#00897B'),
-            ('clearing_score', 'Clearing',     'clearing', '#E65100'),
-            ('flood_score',    'Flood risk',   'flood',    '#6A1B9A'),
-        ]
-        for key, label, wkey, color in criteria:
-            score = comp.get(key, 0)
-            w     = weights.get(wkey, 0)
-            pct   = int(score * 10)
-            st.markdown(
-                f'<div style="margin-bottom:10px;">'
-                f'<div style="display:flex;justify-content:space-between;margin-bottom:2px;">'
-                f'<span style="font-size:0.85rem;font-weight:500;">{label} '
-                f'<span style="color:#888;font-size:0.75rem;">({w*100:.0f}%)</span></span>'
-                f'<span style="font-size:0.85rem;font-weight:700;color:{color};">{score:.1f}/10</span></div>'
-                f'<div style="background:#eee;border-radius:4px;height:8px;">'
-                f'<div style="background:{color};width:{pct}%;height:8px;border-radius:4px;"></div>'
-                f'</div></div>', unsafe_allow_html=True
-            )
-
-        st.markdown('---')
-        st.markdown('#### 🎯 Score → Area Table')
-        for item in results.get('score_thresholds', []):
-            t_val  = item['threshold']
-            ha     = item['area_ha']
-            marker = ' ◀ ~target' if abs(ha - target_ha) < target_ha * 0.15 else ''
-            color  = '#1A9641' if marker else '#333'
-            st.markdown(
-                f'<div style="display:flex;justify-content:space-between;'
-                f'font-size:0.82rem;padding:3px 6px;border-radius:4px;'
-                f'background:{"#EAF5EE" if marker else "transparent"};">'
-                f'<span style="color:{color};">Score ≥ {t_val}</span>'
-                f'<span style="font-weight:600;color:{color};">{ha:,.0f} ha{marker}</span>'
-                f'</div>', unsafe_allow_html=True
-            )
-
-    # ── Downloads ─────────────────────────────────────────────────────────────
-    st.markdown('---')
-    st.markdown(T(lang,'downloads'))
-    dl1, dl2, dl3 = st.columns(3)
-
-    with dl1:
-        best_fc = results.get('best_area_geojson', {})
-        if best_fc:
-            st.download_button(
-                label=T(lang,'dl_best') if not target_ha else T(lang,'dl_best_n',n=target_ha),
-                data=json.dumps(best_fc, indent=2),
-                file_name=f'{parcel_info["name"]}_best_{target_ha}ha.geojson',
-                mime='application/geo+json',
-                use_container_width=True
-            )
-    with dl2:
-        zones_fc = results.get('zones_geojson', {})
-        if zones_fc:
-            st.download_button(
-                label=T(lang,'dl_zones'),
-                data=json.dumps(zones_fc, indent=2),
-                file_name=f'{parcel_info["name"]}_zones.geojson',
-                mime='application/geo+json',
-                use_container_width=True
-            )
-    with dl3:
-        if st.button(T(lang,'dl_pdf'), use_container_width=True):
-            with st.spinner('Building report...'):
-                try:
-                    pdf_bytes = generate_report(
-                        parcel_info=parcel_info,
-                        results=results,
-                        crop_name=crop_name
-                    )
-                    st.download_button(
-                        label='⬇️ Download PDF',
-                        data=pdf_bytes,
-                        file_name=f'{parcel_info["name"]}_{crop_name}_report.pdf',
-                        mime='application/pdf',
-                        use_container_width=True
-                    )
-                except Exception as e:
-                    st.error(f'Report generation failed: {e}')
-
-    with st.expander('⚠️ Important caveats before field decisions'):
-        st.markdown(f'<div class="warn-box">{T(lang,"caveats_body")}</div>', unsafe_allow_html=True)
-
-else:
-    if not parcel_info:
-        st.markdown('---')
-        st.info('Define a parcel above and click **🚀 Run Analysis** in the sidebar to get started.')
-
-def build_report_text(parcel_info, results, crop_name, lang='en'):
-    za     = results['zone_areas']
-    comp   = results['component_means']
-    cfg    = results['crop_config']
-    w      = cfg['weights']
-    total  = sum(za.values()) or 1
-    prime  = za.get('4', 0)
-    good   = za.get('3', 0)
-    marg   = za.get('2', 0)
-    avoid  = za.get('1', 0)
-    best   = prime + good
-    pct    = best / total * 100
-
-    mean_score = results['suit_stats'].get('suitability_mean', 0) or 0
-    min_water  = results['water_stats'].get('dist_water_min', 0) or 0
-    min_elec   = results['elec_stats'].get('dist_grid_min', 0) or 0
-    mean_slope = results['slope_stats'].get('slope_mean', 0) or 0
-
-    crop_label = cfg.get('label_fr', crop_name) if lang == 'fr' else cfg.get('label_en', crop_name)
-
-    if pct >= 50:
-        verdict_en = "The parcel presents **good overall suitability** for the selected crop."
-        verdict_fr = "La parcelle présente une **bonne aptitude générale** pour la culture sélectionnée."
-    elif pct >= 25:
-        verdict_en = "The parcel presents **moderate suitability** with significant constraints in some areas."
-        verdict_fr = "La parcelle présente une **aptitude modérée** avec des contraintes significatives."
-    else:
-        verdict_en = "The parcel presents **limited suitability**. Most of the area has significant constraints."
-        verdict_fr = "La parcelle présente une **aptitude limitée**. La majorité de la zone présente des contraintes importantes."
-
-    en = f"""
-**Parcel:** {parcel_info['name']} | **Area:** {parcel_info['area_ha']:,.0f} ha | **Crop:** {cfg.get('label_en', crop_name)}
-
----
-
-#### Summary
-
-{verdict_en}
-
-Out of the total {parcel_info['area_ha']:,.0f} ha, **{best:,.0f} ha ({pct:.0f}%)** fall into Zone 3 (Good) or Zone 4 (Prime). A further **{marg:,.0f} ha** are marginal, while **{avoid:,.0f} ha** should be avoided.
-
-Mean composite suitability score: **{mean_score:.1f} / 10**
-
----
-
-#### Scoring criteria
-
-| Criterion | Weight | Mean score |
-|---|---|---|
-| Slope | {w['slope']*100:.0f}% | {comp.get('slope_score',0):.1f}/10 |
-| Water proximity | {w['water']*100:.0f}% | {comp.get('water_score',0):.1f}/10 |
-| Electricity | {w['elec']*100:.0f}% | {comp.get('elec_score',0):.1f}/10 |
-| Terrain wetness | {w['wetness']*100:.0f}% | {comp.get('wetness_score',0):.1f}/10 |
-| Clearing cost | {w['clearing']*100:.0f}% | {comp.get('clearing_score',0):.1f}/10 |
-| Flood risk | {w['flood']*100:.0f}% | {comp.get('flood_score',0):.1f}/10 |
-| **Composite** | 100% | **{mean_score:.1f}/10** |
-
-Key distances: water **{min_water/1000:.1f} km** | electricity **{min_elec/1000:.1f} km** | mean slope **{mean_slope:.1f}°**
-
----
-
-#### Zone breakdown
-
-| Zone | Area (ha) | % | Recommendation |
-|---|---|---|---|
-| Zone 4 — Prime | {prime:,.0f} | {prime/total*100:.1f}% | Develop first |
-| Zone 3 — Good | {good:,.0f} | {good/total*100:.1f}% | Phase 2 expansion |
-| Zone 2 — Marginal | {marg:,.0f} | {marg/total*100:.1f}% | Targeted investment needed |
-| Zone 1 — Avoid | {avoid:,.0f} | {avoid/total*100:.1f}% | Not recommended |
-"""
-
-    fr = f"""
-**Parcelle :** {parcel_info['name']} | **Superficie :** {parcel_info['area_ha']:,.0f} ha | **Culture :** {cfg.get('label_fr', crop_name)}
-
----
-
-#### Résumé
-
-{verdict_fr}
-
-Sur les {parcel_info['area_ha']:,.0f} ha analysés, **{best:,.0f} ha ({pct:.0f}%)** se situent en Zone 3 (Bonne) ou Zone 4 (Prime). **{marg:,.0f} ha** supplémentaires sont marginaux, et **{avoid:,.0f} ha** sont à éviter.
-
-Score moyen de l'analyse : **{mean_score:.1f} / 10**
-
----
-
-#### Critères de notation
-
-| Critère | Poids | Score moyen |
-|---|---|---|
-| Pente | {w['slope']*100:.0f}% | {comp.get('slope_score',0):.1f}/10 |
-| Proximité eau | {w['water']*100:.0f}% | {comp.get('water_score',0):.1f}/10 |
-| Électricité | {w['elec']*100:.0f}% | {comp.get('elec_score',0):.1f}/10 |
-| Humidité terrain | {w['wetness']*100:.0f}% | {comp.get('wetness_score',0):.1f}/10 |
-| Coût défrichage | {w['clearing']*100:.0f}% | {comp.get('clearing_score',0):.1f}/10 |
-| Risque inondation | {w['flood']*100:.0f}% | {comp.get('flood_score',0):.1f}/10 |
-| **Score composite** | 100% | **{mean_score:.1f}/10** |
-
-Distances clés : eau **{min_water/1000:.1f} km** | électricité **{min_elec/1000:.1f} km** | pente moyenne **{mean_slope:.1f}°**
-
----
-
-#### Répartition par zone
-
-| Zone | Superficie (ha) | % | Recommandation |
-|---|---|---|---|
-| Zone 4 — Prime | {prime:,.0f} | {prime/total*100:.1f}% | Développer en priorité |
-| Zone 3 — Bonne | {good:,.0f} | {good/total*100:.1f}% | Extension Phase 2 |
-| Zone 2 — Marginale | {marg:,.0f} | {marg/total*100:.1f}% | Investissement ciblé requis |
-| Zone 1 — Éviter | {avoid:,.0f} | {avoid/total*100:.1f}% | Non recommandé |
-"""
-
-    # Return both languages with a divider
+if total == 100:
+    st.session_state['custom_weights'] = new_weights
     if lang == 'fr':
-        return fr + "\n\n---\n\n" + en
+        st.success('✅ Pondérations sauvegardées — elles seront utilisées dans l\'analyse d\'aptitude.')
     else:
-        return en + "\n\n---\n\n" + fr
+        st.success('✅ Weights saved — they will be used in the crop suitability analysis.')
 
+# ── How to use ────────────────────────────────────────────────────────────────
+st.markdown('<hr class="divider">', unsafe_allow_html=True)
 
+if lang == 'fr':
+    st.markdown('### Comment utiliser Cropbility')
+    steps = [
+        ('1', 'Définir votre parcelle', 'Sur la page **Aptitude des cultures**, dessinez votre parcelle sur la carte ou téléversez un fichier KML/KMZ/GeoJSON.'),
+        ('2', 'Choisir votre culture', 'Sélectionnez la culture dans la liste déroulante. Chaque culture a ses propres paramètres agronomiques.'),
+        ('3', 'Lancer l\'analyse', 'Cliquez sur **Lancer l\'analyse**. L\'analyse s\'exécute sur Google Earth Engine (~2–4 minutes).'),
+        ('4', 'Explorer les résultats', 'Consultez la carte des zones, les statistiques et les rapports téléchargeables sur chaque page.'),
+    ]
+else:
+    steps = [
+        ('1', 'Define your parcel', 'On the **Crop Suitability** page, draw your parcel on the map or upload a KML/KMZ/GeoJSON file.'),
+        ('2', 'Choose your crop', 'Select the crop from the dropdown. Each crop has its own agronomic scoring parameters.'),
+        ('3', 'Run the analysis', 'Click **Run Analysis**. The analysis runs on Google Earth Engine (~2–4 minutes).'),
+        ('4', 'Explore results', 'View the zone map, statistics, and downloadable reports on each page.'),
+    ]
+
+cols = st.columns(4)
+for col, (num, title, desc) in zip(cols, steps):
+    with col:
+        st.markdown(
+            f'<div style="text-align:center;padding:1rem;">'
+            f'<div style="font-size:2rem;font-weight:700;color:#1A5C30;">{num}</div>'
+            f'<div style="font-weight:600;margin:6px 0 8px 0;font-size:0.9rem;">{title}</div>'
+            f'<div style="font-size:0.82rem;color:#555;line-height:1.5;">{desc}</div>'
+            f'</div>',
+            unsafe_allow_html=True
+        )
+
+st.markdown('<hr class="divider">', unsafe_allow_html=True)
+st.markdown(
+    '<div style="text-align:center;font-size:0.78rem;color:#999;">'
+    'Cropbility v1.0 — Powered by Google Earth Engine · '
+    'Data: SRTM, HydroSHEDS, Hansen GFC 2025, ESA WorldCover, VIIRS, CHIRPS, NEX-GDDP-CMIP6'
+    '</div>',
+    unsafe_allow_html=True
+)
